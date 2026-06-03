@@ -6,36 +6,22 @@ export interface Campaign {
   status: string;
   daily_budget?: string;
   lifetime_budget?: string;
-  spend_cap?: string;
 }
 
-export interface AdSet {
+export interface AdAccount {
   id: string;
   name: string;
-  campaign_id: string;
-  status: string;
-  daily_budget?: string;
-  lifetime_budget?: string;
+  currency: string;
+  account_status: number;
 }
 
 export interface Insight {
   campaign_id?: string;
-  adset_id?: string;
   spend: string;
   impressions: string;
   clicks: string;
   date_start: string;
   date_stop: string;
-}
-
-export interface AccountSpendSummary {
-  accountId: string;
-  accountName: string;
-  currency: string;
-  todaySpend: number;
-  campaigns: CampaignBudgetInfo[];
-  checkedAt: string;
-  hasActiveSpend: boolean;
 }
 
 export interface CampaignBudgetInfo {
@@ -47,6 +33,41 @@ export interface CampaignBudgetInfo {
   todaySpend: number;
   isActive: boolean;
 }
+
+export interface AccountSummary {
+  accountId: string;
+  accountName: string;
+  currency: string;
+  accountStatus: number;
+  todaySpend: number;
+  campaigns: CampaignBudgetInfo[];
+  hasActiveSpend: boolean;
+  error?: string;
+}
+
+export interface MCCSummary {
+  businessId: string;
+  businessName: string;
+  totalAccounts: number;
+  activeAccounts: number;
+  totalTodaySpend: number;
+  accounts: AccountSummary[];
+  checkedAt: string;
+}
+
+// Account status codes van Meta
+export const ACCOUNT_STATUS_LABELS: Record<number, string> = {
+  1: "ACTIEF",
+  2: "UITGESCHAKELD",
+  3: "VERWIJDERD",
+  7: "GEPAUZEERD",
+  8: "GESLOTEN",
+  9: "IN REVIEW",
+  100: "OPEN",
+  101: "GESLOTEN",
+  201: "IN AFWACHTING",
+  202: "GEWEIGERD",
+};
 
 async function fetchMeta(path: string, params: Record<string, string> = {}): Promise<unknown> {
   const accessToken = process.env.META_ACCESS_TOKEN;
@@ -67,23 +88,33 @@ async function fetchMeta(path: string, params: Record<string, string> = {}): Pro
   return data;
 }
 
-export async function getAccountInfo(adAccountId: string): Promise<{ name: string; currency: string }> {
-  const data = await fetchMeta(adAccountId, {
-    fields: "name,currency",
-  }) as { name: string; currency: string };
-  return { name: data.name, currency: data.currency };
+// Haal alle advertentieaccounts op onder een Business Manager (MCC)
+export async function getAllAdAccounts(businessId: string): Promise<AdAccount[]> {
+  const data = await fetchMeta(`${businessId}/owned_ad_accounts`, {
+    fields: "id,name,currency,account_status",
+    limit: "200",
+  }) as { data: AdAccount[] };
+  return data.data ?? [];
 }
 
-export async function getActiveCampaigns(adAccountId: string): Promise<Campaign[]> {
+// Haal de naam van het Business Manager account op
+export async function getBusinessInfo(businessId: string): Promise<{ name: string }> {
+  const data = await fetchMeta(businessId, {
+    fields: "name",
+  }) as { name: string };
+  return { name: data.name };
+}
+
+async function getActiveCampaigns(adAccountId: string): Promise<Campaign[]> {
   const data = await fetchMeta(`${adAccountId}/campaigns`, {
-    fields: "id,name,status,daily_budget,lifetime_budget,spend_cap",
+    fields: "id,name,status,daily_budget,lifetime_budget",
     filtering: JSON.stringify([{ field: "effective_status", operator: "IN", value: ["ACTIVE", "PAUSED"] }]),
     limit: "100",
   }) as { data: Campaign[] };
   return data.data ?? [];
 }
 
-export async function getTodayInsights(adAccountId: string): Promise<Insight[]> {
+async function getTodayInsights(adAccountId: string): Promise<Insight[]> {
   const today = new Date().toISOString().split("T")[0];
   const data = await fetchMeta(`${adAccountId}/insights`, {
     fields: "campaign_id,spend,impressions,clicks,date_start,date_stop",
@@ -94,47 +125,81 @@ export async function getTodayInsights(adAccountId: string): Promise<Insight[]> 
   return data.data ?? [];
 }
 
-export async function getAccountSpendSummary(): Promise<AccountSpendSummary> {
-  const adAccountId = process.env.META_AD_ACCOUNT_ID;
-  if (!adAccountId) throw new Error("META_AD_ACCOUNT_ID is niet ingesteld in .env.local");
+async function getAccountSummary(account: AdAccount): Promise<AccountSummary> {
+  try {
+    const [campaigns, insights] = await Promise.all([
+      getActiveCampaigns(account.id),
+      getTodayInsights(account.id),
+    ]);
 
-  const [accountInfo, campaigns, insights] = await Promise.all([
-    getAccountInfo(adAccountId),
-    getActiveCampaigns(adAccountId),
-    getTodayInsights(adAccountId),
-  ]);
+    const spendByCampaign = new Map<string, number>();
+    let totalSpend = 0;
 
-  const spendByCampaign = new Map<string, number>();
-  let totalSpend = 0;
-
-  for (const insight of insights) {
-    const spend = parseFloat(insight.spend ?? "0");
-    if (insight.campaign_id) {
-      spendByCampaign.set(insight.campaign_id, (spendByCampaign.get(insight.campaign_id) ?? 0) + spend);
+    for (const insight of insights) {
+      const spend = parseFloat(insight.spend ?? "0");
+      if (insight.campaign_id) {
+        spendByCampaign.set(insight.campaign_id, (spendByCampaign.get(insight.campaign_id) ?? 0) + spend);
+      }
+      totalSpend += spend;
     }
-    totalSpend += spend;
-  }
 
-  const campaignInfos: CampaignBudgetInfo[] = campaigns.map((c) => {
-    const todaySpend = spendByCampaign.get(c.id) ?? 0;
-    return {
+    const campaignInfos: CampaignBudgetInfo[] = campaigns.map((c) => ({
       id: c.id,
       name: c.name,
       status: c.status,
       dailyBudget: c.daily_budget ? parseInt(c.daily_budget) / 100 : null,
       lifetimeBudget: c.lifetime_budget ? parseInt(c.lifetime_budget) / 100 : null,
-      todaySpend,
+      todaySpend: spendByCampaign.get(c.id) ?? 0,
       isActive: c.status === "ACTIVE",
+    }));
+
+    return {
+      accountId: account.id,
+      accountName: account.name,
+      currency: account.currency,
+      accountStatus: account.account_status,
+      todaySpend: totalSpend,
+      campaigns: campaignInfos,
+      hasActiveSpend: totalSpend > 0,
     };
-  });
+  } catch (err) {
+    return {
+      accountId: account.id,
+      accountName: account.name,
+      currency: account.currency,
+      accountStatus: account.account_status,
+      todaySpend: 0,
+      campaigns: [],
+      hasActiveSpend: false,
+      error: err instanceof Error ? err.message : "Onbekende fout",
+    };
+  }
+}
+
+export async function getMCCSummary(): Promise<MCCSummary> {
+  const businessId = process.env.META_BUSINESS_ID;
+  if (!businessId) throw new Error("META_BUSINESS_ID is niet ingesteld in .env.local");
+
+  const [businessInfo, adAccounts] = await Promise.all([
+    getBusinessInfo(businessId),
+    getAllAdAccounts(businessId),
+  ]);
+
+  // Haal data op voor alle accounts tegelijk (parallel)
+  const accountSummaries = await Promise.all(
+    adAccounts.map((account) => getAccountSummary(account))
+  );
+
+  const totalSpend = accountSummaries.reduce((sum, a) => sum + a.todaySpend, 0);
+  const activeAccounts = accountSummaries.filter((a) => a.hasActiveSpend).length;
 
   return {
-    accountId: adAccountId,
-    accountName: accountInfo.name,
-    currency: accountInfo.currency,
-    todaySpend: totalSpend,
-    campaigns: campaignInfos,
+    businessId,
+    businessName: businessInfo.name,
+    totalAccounts: adAccounts.length,
+    activeAccounts,
+    totalTodaySpend: totalSpend,
+    accounts: accountSummaries,
     checkedAt: new Date().toISOString(),
-    hasActiveSpend: totalSpend > 0,
   };
 }
