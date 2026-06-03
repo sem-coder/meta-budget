@@ -9,6 +9,12 @@ interface ApiResponse {
   error?: string;
 }
 
+interface TokenStatus {
+  valid: boolean;
+  expires: string | null;
+  scopes: string[];
+}
+
 function formatCurrency(amount: number, currency: string) {
   return new Intl.NumberFormat("nl-NL", { style: "currency", currency }).format(amount);
 }
@@ -156,6 +162,7 @@ export default function Home() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
+  const [tokenStatus, setTokenStatus] = useState<TokenStatus | null>(null);
 
   const fetchBudget = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true);
@@ -181,6 +188,7 @@ export default function Home() {
 
   useEffect(() => {
     fetchBudget();
+    fetch("/api/status").then((r) => r.json()).then((d: TokenStatus) => setTokenStatus(d));
     const interval = setInterval(() => fetchBudget(), 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [fetchBudget]);
@@ -223,6 +231,25 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* Token status balk */}
+      {tokenStatus && (
+        <div className={`border-b px-6 py-2 text-xs flex items-center gap-2 ${
+          tokenStatus.valid
+            ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-400"
+            : "border-red-500/20 bg-red-500/5 text-red-400"
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${tokenStatus.valid ? "bg-emerald-400" : "bg-red-400"}`} />
+          <span>
+            {tokenStatus.valid
+              ? `Token geldig${tokenStatus.expires ? ` · verloopt ${new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(tokenStatus.expires))}` : ""}`
+              : "Token ongeldig of verlopen — controleer META_ACCESS_TOKEN"}
+          </span>
+          {tokenStatus.valid && tokenStatus.scopes.length > 0 && (
+            <span className="text-white/20 ml-2">scopes: {tokenStatus.scopes.join(", ")}</span>
+          )}
+        </div>
+      )}
 
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
         {/* Loading */}

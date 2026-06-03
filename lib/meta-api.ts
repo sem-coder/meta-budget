@@ -1,5 +1,40 @@
 const META_API_BASE = "https://graph.facebook.com/v20.0";
 
+// Genereer een app access token voor server-side verificatie: app_id|app_secret
+function getAppAccessToken(): string {
+  const appId = process.env.META_APP_ID;
+  const appSecret = process.env.META_APP_SECRET;
+  if (!appId || !appSecret) throw new Error("META_APP_ID of META_APP_SECRET is niet ingesteld");
+  return `${appId}|${appSecret}`;
+}
+
+// Valideer of het user access token nog geldig is
+export async function validateAccessToken(): Promise<{ valid: boolean; expires?: number; scopes?: string[] }> {
+  const userToken = process.env.META_ACCESS_TOKEN;
+  if (!userToken) return { valid: false };
+
+  try {
+    const appToken = getAppAccessToken();
+    const url = new URL(`${META_API_BASE}/debug_token`);
+    url.searchParams.set("input_token", userToken);
+    url.searchParams.set("access_token", appToken);
+
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    const data = await res.json() as { data?: { is_valid: boolean; expires_at?: number; scopes?: string[] } };
+
+    if (data.data?.is_valid) {
+      return {
+        valid: true,
+        expires: data.data.expires_at,
+        scopes: data.data.scopes,
+      };
+    }
+    return { valid: false };
+  } catch {
+    return { valid: false };
+  }
+}
+
 export interface Campaign {
   id: string;
   name: string;
