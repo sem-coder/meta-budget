@@ -7,8 +7,8 @@ const STORAGE_KEY = "meta_selected_accounts";
 
 interface TokenStatus {
   valid: boolean;
-  expires: string | null;
-  scopes: string[];
+  name: string | null;
+  userId: string | null;
 }
 
 function fmt(amount: number, currency: string) {
@@ -391,7 +391,7 @@ export default function Home() {
         }`}>
           <span className={`w-1.5 h-1.5 rounded-full ${tokenStatus.valid ? "bg-emerald-400" : "bg-red-400"}`} />
           {tokenStatus.valid
-            ? `Token actief${tokenStatus.expires ? ` · verloopt ${new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(tokenStatus.expires))}` : ""}`
+            ? `Verbonden als ${tokenStatus.name ?? "onbekend"}${tokenStatus.userId ? ` (${tokenStatus.userId})` : ""}`
             : "Token ongeldig — controleer META_ACCESS_TOKEN in .env.local"}
         </div>
       )}

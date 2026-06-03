@@ -195,22 +195,19 @@ export async function checkSelectedAccounts(accountIds: string[]): Promise<Budge
   };
 }
 
-// Token validatie
-export async function validateAccessToken(): Promise<{ valid: boolean; expires?: number; scopes?: string[] }> {
+// Token validatie via /me — werkt zonder correcte APP_SECRET
+export async function validateAccessToken(): Promise<{ valid: boolean; name?: string; userId?: string }> {
   const userToken = process.env.META_ACCESS_TOKEN;
-  const appId = process.env.META_APP_ID;
-  const appSecret = process.env.META_APP_SECRET;
-  if (!userToken || !appId || !appSecret) return { valid: false };
+  if (!userToken) return { valid: false };
 
   try {
-    const appToken = `${appId}|${appSecret}`;
-    const url = new URL(`${META_API_BASE}/debug_token`);
-    url.searchParams.set("input_token", userToken);
-    url.searchParams.set("access_token", appToken);
+    const url = new URL(`${META_API_BASE}/me`);
+    url.searchParams.set("fields", "id,name");
+    url.searchParams.set("access_token", userToken);
     const res = await fetch(url.toString(), { cache: "no-store" });
-    const data = await res.json() as { data?: { is_valid: boolean; expires_at?: number; scopes?: string[] } };
-    if (data.data?.is_valid) {
-      return { valid: true, expires: data.data.expires_at, scopes: data.data.scopes };
+    const data = await res.json() as { id?: string; name?: string; error?: { message: string } };
+    if (data.id) {
+      return { valid: true, name: data.name, userId: data.id };
     }
     return { valid: false };
   } catch {
