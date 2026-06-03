@@ -1,38 +1,11 @@
 const META_API_BASE = "https://graph.facebook.com/v20.0";
 
-// Genereer een app access token voor server-side verificatie: app_id|app_secret
-function getAppAccessToken(): string {
-  const appId = process.env.META_APP_ID;
-  const appSecret = process.env.META_APP_SECRET;
-  if (!appId || !appSecret) throw new Error("META_APP_ID of META_APP_SECRET is niet ingesteld");
-  return `${appId}|${appSecret}`;
-}
-
-// Valideer of het user access token nog geldig is
-export async function validateAccessToken(): Promise<{ valid: boolean; expires?: number; scopes?: string[] }> {
-  const userToken = process.env.META_ACCESS_TOKEN;
-  if (!userToken) return { valid: false };
-
-  try {
-    const appToken = getAppAccessToken();
-    const url = new URL(`${META_API_BASE}/debug_token`);
-    url.searchParams.set("input_token", userToken);
-    url.searchParams.set("access_token", appToken);
-
-    const res = await fetch(url.toString(), { cache: "no-store" });
-    const data = await res.json() as { data?: { is_valid: boolean; expires_at?: number; scopes?: string[] } };
-
-    if (data.data?.is_valid) {
-      return {
-        valid: true,
-        expires: data.data.expires_at,
-        scopes: data.data.scopes,
-      };
-    }
-    return { valid: false };
-  } catch {
-    return { valid: false };
-  }
+export interface AdAccount {
+  id: string;
+  name: string;
+  currency: string;
+  account_status: number;
+  business?: { id: string; name: string };
 }
 
 export interface Campaign {
@@ -41,13 +14,6 @@ export interface Campaign {
   status: string;
   daily_budget?: string;
   lifetime_budget?: string;
-}
-
-export interface AdAccount {
-  id: string;
-  name: string;
-  currency: string;
-  account_status: number;
 }
 
 export interface Insight {
@@ -74,15 +40,14 @@ export interface AccountSummary {
   accountName: string;
   currency: string;
   accountStatus: number;
+  businessName?: string;
   todaySpend: number;
   campaigns: CampaignBudgetInfo[];
   hasActiveSpend: boolean;
   error?: string;
 }
 
-export interface MCCSummary {
-  businessId: string;
-  businessName: string;
+export interface BudgetCheckResult {
   totalAccounts: number;
   activeAccounts: number;
   totalTodaySpend: number;
@@ -90,23 +55,18 @@ export interface MCCSummary {
   checkedAt: string;
 }
 
-// Account status codes van Meta
 export const ACCOUNT_STATUS_LABELS: Record<number, string> = {
-  1: "ACTIEF",
-  2: "UITGESCHAKELD",
-  3: "VERWIJDERD",
-  7: "GEPAUZEERD",
-  8: "GESLOTEN",
-  9: "IN REVIEW",
-  100: "OPEN",
-  101: "GESLOTEN",
-  201: "IN AFWACHTING",
-  202: "GEWEIGERD",
+  1: "Actief",
+  2: "Uitgeschakeld",
+  3: "Verwijderd",
+  7: "Gepauzeerd",
+  8: "Gesloten",
+  9: "In review",
 };
 
 async function fetchMeta(path: string, params: Record<string, string> = {}): Promise<unknown> {
   const accessToken = process.env.META_ACCESS_TOKEN;
-  if (!accessToken) throw new Error("META_ACCESS_TOKEN is niet ingesteld in .env.local");
+  if (!accessToken) throw new Error("META_ACCESS_TOKEN is niet ingesteld");
 
   const url = new URL(`${META_API_BASE}/${path}`);
   url.searchParams.set("access_token", accessToken);
@@ -116,31 +76,40 @@ async function fetchMeta(path: string, params: Record<string, string> = {}): Pro
 
   const res = await fetch(url.toString(), { cache: "no-store" });
   const data = await res.json() as { error?: { message: string; type: string }; [key: string]: unknown };
-
-  if (data.error) {
-    throw new Error(`Meta API fout: ${data.error.message} (${data.error.type})`);
-  }
+  if (data.error) throw new Error(`Meta API: ${data.error.message}`);
   return data;
 }
 
-// Haal alle advertentieaccounts op onder een Business Manager (MCC)
-export async function getAllAdAccounts(businessId: string): Promise<AdAccount[]> {
-  const data = await fetchMeta(`${businessId}/owned_ad_accounts`, {
-    fields: "id,name,currency,account_status",
+// Haal alle ad accounts op die toegankelijk zijn via de app token
+export async function getAllAccessibleAccounts(): Promise<AdAccount[]> {
+  const accounts: AdAccount[] = [];
+  let url: string | null = `me/adaccounts`;
+  const params = {
+    fields: "id,name,currency,account_status,business",
     limit: "200",
-  }) as { data: AdAccount[] };
-  return data.data ?? [];
+  };
+
+  // Pagination: haal alle pagina's op
+  while (url) {
+    const data = await fetchMeta(url, url === `me/adaccounts` ? params : {}) as {
+      data: AdAccount[];
+      paging?: { next?: string };
+    };
+    accounts.push(...(data.data ?? []));
+    const next = data.paging?.next;
+    if (next) {
+      // Gebruik de volledige next URL direct
+      const nextUrl = new URL(next);
+      url = nextUrl.pathname.replace("/v20.0/", "") + nextUrl.search;
+    } else {
+      url = null;
+    }
+  }
+
+  return accounts;
 }
 
-// Haal de naam van het Business Manager account op
-export async function getBusinessInfo(businessId: string): Promise<{ name: string }> {
-  const data = await fetchMeta(businessId, {
-    fields: "name",
-  }) as { name: string };
-  return { name: data.name };
-}
-
-async function getActiveCampaigns(adAccountId: string): Promise<Campaign[]> {
+async function getCampaigns(adAccountId: string): Promise<Campaign[]> {
   const data = await fetchMeta(`${adAccountId}/campaigns`, {
     fields: "id,name,status,daily_budget,lifetime_budget",
     filtering: JSON.stringify([{ field: "effective_status", operator: "IN", value: ["ACTIVE", "PAUSED"] }]),
@@ -152,7 +121,7 @@ async function getActiveCampaigns(adAccountId: string): Promise<Campaign[]> {
 async function getTodayInsights(adAccountId: string): Promise<Insight[]> {
   const today = new Date().toISOString().split("T")[0];
   const data = await fetchMeta(`${adAccountId}/insights`, {
-    fields: "campaign_id,spend,impressions,clicks,date_start,date_stop",
+    fields: "campaign_id,spend,impressions,clicks",
     time_range: JSON.stringify({ since: today, until: today }),
     level: "campaign",
     limit: "100",
@@ -160,41 +129,37 @@ async function getTodayInsights(adAccountId: string): Promise<Insight[]> {
   return data.data ?? [];
 }
 
-async function getAccountSummary(account: AdAccount): Promise<AccountSummary> {
+export async function getAccountSummary(account: AdAccount): Promise<AccountSummary> {
   try {
     const [campaigns, insights] = await Promise.all([
-      getActiveCampaigns(account.id),
+      getCampaigns(account.id),
       getTodayInsights(account.id),
     ]);
 
-    const spendByCampaign = new Map<string, number>();
+    const spendMap = new Map<string, number>();
     let totalSpend = 0;
-
-    for (const insight of insights) {
-      const spend = parseFloat(insight.spend ?? "0");
-      if (insight.campaign_id) {
-        spendByCampaign.set(insight.campaign_id, (spendByCampaign.get(insight.campaign_id) ?? 0) + spend);
-      }
+    for (const i of insights) {
+      const spend = parseFloat(i.spend ?? "0");
+      if (i.campaign_id) spendMap.set(i.campaign_id, (spendMap.get(i.campaign_id) ?? 0) + spend);
       totalSpend += spend;
     }
-
-    const campaignInfos: CampaignBudgetInfo[] = campaigns.map((c) => ({
-      id: c.id,
-      name: c.name,
-      status: c.status,
-      dailyBudget: c.daily_budget ? parseInt(c.daily_budget) / 100 : null,
-      lifetimeBudget: c.lifetime_budget ? parseInt(c.lifetime_budget) / 100 : null,
-      todaySpend: spendByCampaign.get(c.id) ?? 0,
-      isActive: c.status === "ACTIVE",
-    }));
 
     return {
       accountId: account.id,
       accountName: account.name,
       currency: account.currency,
       accountStatus: account.account_status,
+      businessName: account.business?.name,
       todaySpend: totalSpend,
-      campaigns: campaignInfos,
+      campaigns: campaigns.map((c) => ({
+        id: c.id,
+        name: c.name,
+        status: c.status,
+        dailyBudget: c.daily_budget ? parseInt(c.daily_budget) / 100 : null,
+        lifetimeBudget: c.lifetime_budget ? parseInt(c.lifetime_budget) / 100 : null,
+        todaySpend: spendMap.get(c.id) ?? 0,
+        isActive: c.status === "ACTIVE",
+      })),
       hasActiveSpend: totalSpend > 0,
     };
   } catch (err) {
@@ -203,6 +168,7 @@ async function getAccountSummary(account: AdAccount): Promise<AccountSummary> {
       accountName: account.name,
       currency: account.currency,
       accountStatus: account.account_status,
+      businessName: account.business?.name,
       todaySpend: 0,
       campaigns: [],
       hasActiveSpend: false,
@@ -211,30 +177,43 @@ async function getAccountSummary(account: AdAccount): Promise<AccountSummary> {
   }
 }
 
-export async function getMCCSummary(): Promise<MCCSummary> {
-  const businessId = process.env.META_BUSINESS_ID;
-  if (!businessId) throw new Error("META_BUSINESS_ID is niet ingesteld in .env.local");
-
-  const [businessInfo, adAccounts] = await Promise.all([
-    getBusinessInfo(businessId),
-    getAllAdAccounts(businessId),
-  ]);
-
-  // Haal data op voor alle accounts tegelijk (parallel)
-  const accountSummaries = await Promise.all(
-    adAccounts.map((account) => getAccountSummary(account))
+export async function checkSelectedAccounts(accountIds: string[]): Promise<BudgetCheckResult> {
+  const allAccounts = await getAllAccessibleAccounts();
+  const selected = allAccounts.filter((a) =>
+    accountIds.length === 0 ? true : accountIds.includes(a.id)
   );
 
-  const totalSpend = accountSummaries.reduce((sum, a) => sum + a.todaySpend, 0);
-  const activeAccounts = accountSummaries.filter((a) => a.hasActiveSpend).length;
+  const summaries = await Promise.all(selected.map(getAccountSummary));
+  const totalSpend = summaries.reduce((s, a) => s + a.todaySpend, 0);
 
   return {
-    businessId,
-    businessName: businessInfo.name,
-    totalAccounts: adAccounts.length,
-    activeAccounts,
+    totalAccounts: summaries.length,
+    activeAccounts: summaries.filter((a) => a.hasActiveSpend).length,
     totalTodaySpend: totalSpend,
-    accounts: accountSummaries,
+    accounts: summaries,
     checkedAt: new Date().toISOString(),
   };
+}
+
+// Token validatie
+export async function validateAccessToken(): Promise<{ valid: boolean; expires?: number; scopes?: string[] }> {
+  const userToken = process.env.META_ACCESS_TOKEN;
+  const appId = process.env.META_APP_ID;
+  const appSecret = process.env.META_APP_SECRET;
+  if (!userToken || !appId || !appSecret) return { valid: false };
+
+  try {
+    const appToken = `${appId}|${appSecret}`;
+    const url = new URL(`${META_API_BASE}/debug_token`);
+    url.searchParams.set("input_token", userToken);
+    url.searchParams.set("access_token", appToken);
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    const data = await res.json() as { data?: { is_valid: boolean; expires_at?: number; scopes?: string[] } };
+    if (data.data?.is_valid) {
+      return { valid: true, expires: data.data.expires_at, scopes: data.data.scopes };
+    }
+    return { valid: false };
+  } catch {
+    return { valid: false };
+  }
 }
